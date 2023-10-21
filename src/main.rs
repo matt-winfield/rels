@@ -7,6 +7,7 @@ use git2::{Commit, Repository, RepositoryOpenFlags, Tag};
 
 // TODO:
 // - Allow option to link to commit in GitHub/GitLab/DevOps/etc
+// - Allow option to show commit SHA
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -47,6 +48,9 @@ struct Args {
         help = "Show all commits, not just those matching the JIRA regex."
     )]
     all: bool,
+
+    #[arg(short, long, help = "Filter by tag name or commit message")]
+    filter: Option<String>,
 }
 
 fn get_repo() -> Repository {
@@ -308,17 +312,37 @@ fn main() {
     for tag_name in tag_names {
         let empty = Vec::new();
         let commits = tag_to_commits.get(&tag_name).unwrap_or(&empty);
+        let tag_matches_filter = if let Some(filter) = args.filter.clone() {
+            tag_name.contains(&filter)
+        } else {
+            true
+        };
 
-        match commits.is_empty() {
+        let filtered_commits = commits
+            .iter()
+            .filter(|commit| {
+                if let Some(filter) = args.filter.clone() {
+                    tag_matches_filter || commit.formatted_tickets.contains(&filter)
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if args.filter.is_some() && !tag_matches_filter && filtered_commits.is_empty() {
+            continue;
+        }
+
+        match filtered_commits.is_empty() {
             true => {
-                println!("{}", format!("{} (no unique commits)", tag_name).dimmed())
+                println!("{}", format!("{} (no entries)", tag_name).dimmed())
             }
             false => {
                 println!("{}", tag_name.green().bold())
             }
         }
 
-        for commit in commits {
+        for commit in filtered_commits {
             if args.jira_url.is_some() {
                 println!(
                     "  {: <10} | {}",
