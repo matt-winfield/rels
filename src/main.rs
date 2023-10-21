@@ -8,6 +8,7 @@ use git2::{Commit, Repository, RepositoryOpenFlags, Tag};
 // TODO:
 // - Allow option to link to commit in GitHub/GitLab/DevOps/etc
 // - Allow option to show commit SHA
+// - Option to find via release branch instead of tag
 
 #[derive(Parser, Debug)]
 struct Args {
