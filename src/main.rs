@@ -107,7 +107,7 @@ fn main() {
 
     let _ = repo.tag_foreach(|tag_id, _| {
         let tag = repo.find_tag(tag_id).unwrap();
-        println!("{}", tag.name().unwrap_or_default());
+        println!("{}", tag.name().unwrap_or_default().green());
 
         if let Ok(target) = tag.target() {
             if let Ok(commit) = repo.find_commit(target.id()) {
@@ -115,10 +115,10 @@ fn main() {
                     return true;
                 }
 
-                println!("  {}", commit.message().unwrap_or_default());
+                println!("  {}", commit.message().unwrap_or_default().trim());
                 let parents = get_parent_commits(&repo, commit, args.depth);
                 for parent in parents {
-                    println!("  {}", parent.commit.message().unwrap_or_default());
+                    println!("  {}", parent.commit.message().unwrap_or_default().trim());
                 }
             }
         }
