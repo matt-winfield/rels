@@ -1,8 +1,14 @@
 use colored::Colorize;
+use regex::Regex;
 use std::{collections::HashMap, env, time::SystemTime};
 
 use clap::Parser;
-use git2::{Commit, Repository, RepositoryOpenFlags};
+use git2::{Commit, Repository, RepositoryOpenFlags, Tag};
+
+// TODO:
+// - Filter commits to only those matching a regex for JIRA ticket numbers
+//      - Allow option to link to JIRA ticket, based on base URL
+// - Allow option to link to commit in GitHub/GitLab/DevOps/etc
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -21,6 +27,21 @@ struct Args {
         help = "The maximum age of tags to show, in the format 1y 2mon 3w 4d 5h 6m 7s"
     )]
     age: String,
+
+    #[arg(
+        short = 'u',
+        long,
+        help = "The base URL for JIRA tickets, e.g. `https://jira.example.com/browse/`. If not specified, JIRA ticket numbers will not be linked. If {ticket} is included in the URL, it will be replaced with the ticket number, otherwise it will be appended to end of the URL."
+    )]
+    jira_url: Option<String>,
+
+    #[arg(
+        short = 'r',
+        long,
+        default_value = "[A-Z]+-[0-9]+",
+        help = "The regex to use to match JIRA ticket numbers"
+    )]
+    jira_regex: String,
 }
 
 fn get_repo() -> Repository {
@@ -43,6 +64,16 @@ fn get_repo() -> Repository {
             std::process::exit(1);
         }
     }
+}
+
+fn get_tags<'a>(repo: &'a Repository) -> Vec<Tag<'a>> {
+    let mut tags = Vec::new();
+    repo.tag_foreach(|tag_id, _| {
+        let tag = repo.find_tag(tag_id).unwrap();
+        tags.push(tag);
+        true
+    });
+    tags
 }
 
 struct CommitDepthInfo<'a> {
@@ -99,6 +130,86 @@ fn commit_is_within_duration(commit: &Commit, max_age: std::time::Duration) -> b
     true
 }
 
+enum GetTagCommitsError {
+    NoTags,
+    Git(git2::Error),
+    Regex(regex::Error),
+}
+
+impl From<git2::Error> for GetTagCommitsError {
+    fn from(err: git2::Error) -> Self {
+        GetTagCommitsError::Git(err)
+    }
+}
+
+impl From<regex::Error> for GetTagCommitsError {
+    fn from(err: regex::Error) -> Self {
+        GetTagCommitsError::Regex(err)
+    }
+}
+
+fn get_tag_commits(
+    repo: &Repository,
+    max_age: std::time::Duration,
+    max_depth: usize,
+    jira_regex: String,
+) -> Result<
+    (
+        HashMap<std::string::String, CommitTagInfo<'_>>,
+        Vec<std::string::String>,
+    ),
+    GetTagCommitsError,
+> {
+    let mut commit_to_tag: HashMap<String, CommitTagInfo> = HashMap::new();
+    let mut tag_names = Vec::new();
+    let regex = Regex::new(jira_regex.as_str())?;
+
+    for tag in get_tags(&repo) {
+        let tag_name = tag.name().ok_or(GetTagCommitsError::NoTags)?.to_owned();
+        tag_names.push(tag_name.clone());
+
+        let commit = repo.find_commit(tag.target()?.id())?;
+        if !commit_is_within_duration(&commit, max_age) {
+            continue;
+        }
+
+        // Add the commit directly referenced by the tag
+        commit_to_tag.insert(
+            commit.id().to_string(),
+            CommitTagInfo {
+                commit: commit.clone(),
+                depth: 0,
+                tag_name: tag_name.clone(),
+            },
+        );
+
+        let parents = get_parent_commits(&repo, commit, max_depth);
+        for parent in parents {
+            let parent_id = parent.commit.id().to_string();
+            let parent_depth = parent.depth;
+
+            if let Some(existing) = commit_to_tag.get(&parent_id) {
+                if existing.depth < parent_depth {
+                    continue;
+                }
+            }
+
+            commit_to_tag.insert(
+                parent_id,
+                CommitTagInfo {
+                    commit: parent.commit,
+                    depth: parent_depth,
+                    tag_name: tag_name.clone(),
+                },
+            );
+        }
+    }
+
+    tag_names.sort();
+
+    return Ok((commit_to_tag, tag_names));
+}
+
 struct CommitTagInfo<'a> {
     commit: Commit<'a>,
     depth: usize,
@@ -110,55 +221,24 @@ fn main() {
     let repo = get_repo();
 
     let max_age = duration_str::parse(&args.age).unwrap_or_default();
-
-    let mut commit_to_tag: HashMap<String, CommitTagInfo> = HashMap::new();
-    let mut tag_names = Vec::new();
-
-    let _ = repo.tag_foreach(|tag_id, _| {
-        let tag = repo.find_tag(tag_id).unwrap();
-        let tag_name = tag.name().unwrap_or_default().to_owned();
-        tag_names.push(tag_name.clone());
-
-        if let Ok(target) = tag.target() {
-            if let Ok(commit) = repo.find_commit(target.id()) {
-                if !commit_is_within_duration(&commit, max_age) {
-                    return true;
-                }
-
-                // Add the commit directly referenced by the tag
-                commit_to_tag.insert(
-                    commit.id().to_string(),
-                    CommitTagInfo {
-                        commit: commit.clone(),
-                        depth: 0,
-                        tag_name: tag_name.clone(),
-                    },
-                );
-
-                let parents = get_parent_commits(&repo, commit, args.depth);
-                for parent in parents {
-                    let parent_id = parent.commit.id().to_string();
-                    let parent_depth = parent.depth;
-
-                    if let Some(existing) = commit_to_tag.get(&parent_id) {
-                        if existing.depth < parent_depth {
-                            continue;
-                        }
+    let (commit_to_tag, tag_names) =
+        match get_tag_commits(&repo, max_age, args.depth, args.jira_regex) {
+            Ok((commit_to_tag, tag_names)) => (commit_to_tag, tag_names),
+            Err(err) => {
+                match err {
+                    GetTagCommitsError::Git(err) => {
+                        eprintln!("{}", format!("Git error: {}", err).red());
                     }
-
-                    commit_to_tag.insert(
-                        parent_id,
-                        CommitTagInfo {
-                            commit: parent.commit,
-                            depth: parent_depth,
-                            tag_name: tag_name.clone(),
-                        },
-                    );
+                    GetTagCommitsError::Regex(err) => {
+                        eprintln!("{}", format!("Regex error: {}", err).red());
+                    }
+                    GetTagCommitsError::NoTags => {
+                        eprintln!("{}", "No tags found!".red());
+                    }
                 }
+                std::process::exit(1);
             }
-        }
-        true
-    });
+        };
 
     let tag_to_commits = commit_to_tag
         .iter()
@@ -168,8 +248,6 @@ fn main() {
                 .push(info);
             map
         });
-
-    tag_names.sort();
 
     for tag_name in tag_names {
         let empty = Vec::new();
