@@ -79,8 +79,9 @@ fn get_repo() -> Repository {
 fn get_tags<'a>(repo: &'a Repository) -> Vec<Tag<'a>> {
     let mut tags = Vec::new();
     let _ = repo.tag_foreach(|tag_id, _| {
-        let tag = repo.find_tag(tag_id).unwrap();
-        tags.push(tag);
+        if let Ok(tag) = repo.find_tag(tag_id) {
+            tags.push(tag);
+        }
         true
     });
     tags
